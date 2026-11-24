@@ -1,0 +1,48 @@
+{
+    "name": "trackified/trackified-php",
+    "description": "Official PHP SDK for the Trackified parcel-tracking API",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["trackified", "parcel-tracking", "shipping", "tracking", "sdk", "api"],
+    "homepage": "https://trackified.net",
+    "support": {
+        "docs": "https://forumulate.com/p/trackified/docs",
+        "issues": "https://github.com/trackified/trackified-php/issues",
+        "source": "https://github.com/trackified/trackified-php"
+    },
+    "require": {
+        "php": ">=8.1",
+        "ext-json": "*",
+        "php-http/discovery": "^1.19",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0"
+    },
+    "require-dev": {
+        "friendsofphp/php-cs-fixer": "^3.64",
+        "nyholm/psr7": "^1.8",
+        "phpstan/phpstan": "^2.0",
+        "phpunit/phpunit": "^10.5 || ^11.0"
+    },
+    "suggest": {
+        "ext-curl": "Used when no PSR-18 HTTP client (Guzzle, Symfony HttpClient, ...) is installed",
+        "guzzlehttp/guzzle": "A PSR-18 HTTP client",
+        "symfony/http-client": "A PSR-18 HTTP client"
+    },
+    "autoload": {
+        "psr-4": { "Trackified\\": "src/" }
+    },
+    "autoload-dev": {
+        "psr-4": { "Trackified\\Tests\\": "tests/" }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "stan": "phpstan analyse --no-progress",
+        "cs": "php-cs-fixer fix --dry-run --diff",
+        "cs-fix": "php-cs-fixer fix"
+    },
+    "config": {
+        "allow-plugins": { "php-http/discovery": false },
+        "sort-packages": true
+    }
+}
