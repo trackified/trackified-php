@@ -31,9 +31,9 @@ final class MockHttpClient implements ClientInterface
         return $this;
     }
 
-    public function pushNetworkError(RequestInterface $request): self
+    public function pushNetworkError(RequestInterface $request, string $message = 'connection refused'): self
     {
-        $this->queue[] = new class('connection refused', $request) extends \RuntimeException implements NetworkExceptionInterface {
+        $this->queue[] = new class($message, $request) extends \RuntimeException implements NetworkExceptionInterface {
             public function __construct(string $m, private RequestInterface $r)
             {
                 parent::__construct($m);

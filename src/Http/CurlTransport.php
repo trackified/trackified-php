@@ -20,7 +20,7 @@ final class CurlTransport implements Transport
     public function send(string $method, string $url, array $headers, ?string $body): Response
     {
         if (!\function_exists('curl_init')) {
-            throw new ConnectionError('No PSR-18 HTTP client found and ext-curl is not installed. Install guzzlehttp/guzzle or symfony/http-client.');
+            throw new ConnectionError('No PSR-18 HTTP client found and ext-curl is not installed. Install guzzlehttp/guzzle or symfony/http-client.', errorCode: ConnectionError::CONNECTION);
         }
 
         $responseHeaders = [];
@@ -51,7 +51,8 @@ final class CurlTransport implements Transport
         $result = curl_exec($ch);
         if (!\is_string($result)) {
             $error = curl_error($ch);
-            throw new ConnectionError('Request to Trackified failed: '.$error);
+            $code = \CURLE_OPERATION_TIMEDOUT === curl_errno($ch) ? ConnectionError::TIMEOUT : ConnectionError::CONNECTION;
+            throw new ConnectionError('Request to Trackified failed: '.$error, errorCode: $code);
         }
         $status = curl_getinfo($ch, \CURLINFO_RESPONSE_CODE);
 

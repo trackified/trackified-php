@@ -6,6 +6,7 @@ namespace Trackified\Resource;
 
 use Trackified\Model\Carrier;
 use Trackified\Model\CarrierCandidate;
+use Trackified\Model\CarrierResolution;
 use Trackified\Model\Data;
 use Trackified\Model\Page;
 
@@ -24,6 +25,18 @@ final class Carriers extends Resource
     public function get(string $id): Carrier
     {
         return Carrier::fromArray($this->client->request('GET', '/v1/carriers/'.self::id($id)));
+    }
+
+    /**
+     * Map free text ("USPS Priority Mail", "dhl_express", "Correos de España") to a carrier we serve.
+     *
+     * @return ?CarrierResolution null when nothing we serve matches
+     */
+    public function resolve(string $name): ?CarrierResolution
+    {
+        $body = $this->client->request('GET', '/v1/carriers/resolve', ['name' => $name]);
+
+        return null === Data::nstr($body, 'carrier') ? null : CarrierResolution::fromArray($body);
     }
 
     /**

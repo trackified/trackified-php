@@ -18,6 +18,8 @@ final class LiveTest extends TestCase
         $client = new TrackifiedClient();
 
         self::assertNotSame('', $client->usage->get()->plan);
+        self::assertSame(['status' => 'ok'], $client->health());
+        self::assertSame('usps', $client->carriers->resolve('USPS Priority Mail')?->carrier);
         self::assertSame('usps', $client->carriers->detect('9434650110837017316201')[0]->carrier);
 
         $t = $client->trackings->create(['tracking_number' => '9434650110837017316201', 'carrier' => 'usps']);

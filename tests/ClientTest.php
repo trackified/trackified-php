@@ -9,9 +9,12 @@ use Nyholm\Psr7\Request;
 use PHPUnit\Framework\TestCase;
 use Trackified\Exception\APIError;
 use Trackified\Exception\AuthenticationError;
+use Trackified\Exception\ConflictError;
 use Trackified\Exception\ConnectionError;
 use Trackified\Exception\NotFoundError;
+use Trackified\Exception\QuotaExceededError;
 use Trackified\Exception\RateLimitError;
+use Trackified\Exception\TrackifiedError;
 use Trackified\Exception\ValidationError;
 use Trackified\Model\EventStatus;
 use Trackified\Model\TrackingStatus;
@@ -27,11 +30,11 @@ final class ClientTest extends TestCase
         $this->http = new MockHttpClient();
     }
 
-    private function client(int $maxRetries = 2): TrackifiedClient
+    private function client(int $maxRetries = 2, string $baseUrl = 'https://api.example.test/', ?callable $onRequest = null, ?callable $onResponse = null): TrackifiedClient
     {
         $f = new Psr17Factory();
 
-        return new TrackifiedClient('tk_test_123', 'https://api.example.test/', maxRetries: $maxRetries, httpClient: $this->http, requestFactory: $f, streamFactory: $f);
+        return new TrackifiedClient('tk_test_123', $baseUrl, maxRetries: $maxRetries, httpClient: $this->http, requestFactory: $f, streamFactory: $f, onRequest: $onRequest, onResponse: $onResponse);
     }
 
     /** @return array<string, mixed> */
@@ -107,7 +110,7 @@ final class ClientTest extends TestCase
 
     public function testErrorMapping(): void
     {
-        $cases = [401 => AuthenticationError::class, 404 => NotFoundError::class, 400 => ValidationError::class, 500 => APIError::class];
+        $cases = [401 => AuthenticationError::class, 402 => QuotaExceededError::class, 404 => NotFoundError::class, 409 => ConflictError::class, 400 => ValidationError::class, 500 => APIError::class];
         foreach ($cases as $status => $class) {
             $this->http->push($status, ['error' => ['code' => 'c', 'message' => 'm', 'request_id' => 'r']]);
             try {
@@ -189,5 +192,130 @@ final class ClientTest extends TestCase
         putenv('TRACKIFIED_API_KEY');
         $this->expectException(AuthenticationError::class);
         new TrackifiedClient(httpClient: $this->http);
+    }
+
+    public function testBaseUrlAcceptsV1AndTrailingSlash(): void
+    {
+        foreach (['https://api.example.test', 'https://api.example.test/', 'https://api.example.test/v1', 'https://api.example.test/v1/'] as $url) {
+            $this->http->push(200, ['plan' => 'free']);
+            $this->client(0, $url)->usage->get();
+        }
+        foreach ($this->http->requests as $r) {
+            self::assertSame('https://api.example.test/v1/account/usage', (string) $r->getUri());
+        }
+    }
+
+    public function testHealth(): void
+    {
+        $this->http->push(200, ['status' => 'ok']);
+        self::assertSame(['status' => 'ok'], $this->client()->health());
+        self::assertSame('/v1/health', $this->http->requests[0]->getUri()->getPath());
+    }
+
+    public function testConflictIsNotRetried(): void
+    {
+        $this->http->push(409, ['error' => ['code' => 'idempotency_in_progress', 'message' => 'busy']]);
+        try {
+            $this->client()->trackings->create(['tracking_number' => 'X']);
+            self::fail('expected ConflictError');
+        } catch (ConflictError $e) {
+            self::assertSame('idempotency_in_progress', $e->errorCode);
+            self::assertInstanceOf(TrackifiedError::class, $e);
+        }
+        self::assertCount(1, $this->http->requests);
+    }
+
+    public function testConnectionErrorCode(): void
+    {
+        $this->http->pushNetworkError(new Request('GET', '/'), 'cURL error 28: Operation timed out after 30001 milliseconds')
+            ->pushNetworkError(new Request('GET', '/'));
+        foreach (['timeout', 'connection'] as $code) {
+            try {
+                $this->client(0)->health();
+                self::fail('expected ConnectionError');
+            } catch (ConnectionError $e) {
+                self::assertSame($code, $e->errorCode);
+            }
+        }
+    }
+
+    public function testResolveCarrier(): void
+    {
+        $this->http->push(200, ['carrier' => 'usps', 'name' => 'USPS', 'confidence' => 0.97, 'matched' => 'alias'])
+            ->push(200, ['carrier' => null, 'confidence' => 0]);
+        $c = $this->client();
+        $r = $c->carriers->resolve('USPS Priority Mail');
+        self::assertNotNull($r);
+        self::assertSame(['usps', 'USPS', 0.97, 'alias'], [$r->carrier, $r->name, $r->confidence, $r->matched]);
+        self::assertSame('name=USPS%20Priority%20Mail', $this->http->requests[0]->getUri()->getQuery());
+        self::assertNull($c->carriers->resolve('nope'));
+    }
+
+    public function testCarrierAliasesAndDisplayNameSpellings(): void
+    {
+        $this->http->push(200, ['id' => 'ups', 'display_name' => 'UPS', 'aliases' => ['ups_ground']]);
+        $carrier = $this->client()->carriers->get('ups');
+        self::assertSame(['UPS', ['ups_ground']], [$carrier->displayName, $carrier->aliases]);
+    }
+
+    public function testUpdateAndRotateWebhook(): void
+    {
+        $this->http->push(200, ['id' => 'wh_1', 'url' => 'https://x.test', 'enabled' => false])
+            ->push(200, ['id' => 'wh_1', 'secret' => 'whsec_new', 'previous_secret_expires_at' => '2026-11-25T00:00:00Z']);
+        $c = $this->client();
+        self::assertFalse($c->webhooks->update('wh_1', enabled: false, eventTypes: [WebhookEventType::Delivered])->enabled);
+        self::assertSame('PATCH', $this->http->requests[0]->getMethod());
+        self::assertSame(['event_types' => ['tracking.delivered'], 'enabled' => false], json_decode((string) $this->http->requests[0]->getBody(), true));
+
+        $w = $c->webhooks->rotateSecret('wh_1', 0);
+        self::assertSame(['whsec_new', '2026-11-25T00:00:00Z'], [$w->secret, $w->previousSecretExpiresAt]);
+        self::assertSame('/v1/webhooks/wh_1/rotate-secret', $this->http->requests[1]->getUri()->getPath());
+        self::assertSame(['expires_in_hours' => 0], json_decode((string) $this->http->requests[1]->getBody(), true));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $c->webhooks->update('wh_1');
+    }
+
+    public function testHooksRunOncePerAttemptAndMayThrow(): void
+    {
+        /** @var list<array{string, array<string, mixed>}> $seen */
+        $seen = [];
+        $onRequest = static function (array $i) use (&$seen): void {
+            $seen[] = ['req', $i];
+            throw new \RuntimeException('boom');
+        };
+        $onResponse = static function (array $i) use (&$seen): void {
+            $seen[] = ['res', $i];
+            throw new \RuntimeException('boom');
+        };
+        $this->http->push(503, 'oops', ['x-request-id' => 'req_a'])
+            ->push(201, self::tracking(), ['x-request-id' => 'req_b', 'idempotent-replayed' => 'true']);
+        $t = $this->client(1, onRequest: $onRequest, onResponse: $onResponse)->trackings->create(['tracking_number' => 'X'], 'k1');
+
+        self::assertSame('trk_1', $t->id);
+        self::assertSame(['req', 'res', 'req', 'res'], array_column($seen, 0));
+        self::assertSame(['method' => 'POST', 'url' => 'https://api.example.test/v1/trackings', 'attempt' => 1, 'idempotencyKey' => 'k1'], $seen[0][1]);
+        self::assertSame(503, $seen[1][1]['status']);
+        self::assertSame('req_a', $seen[1][1]['requestId']);
+        self::assertInstanceOf(APIError::class, $seen[1][1]['error']);
+        self::assertSame(2, $seen[3][1]['attempt']);
+        self::assertSame(201, $seen[3][1]['status']);
+        self::assertTrue($seen[3][1]['idempotentReplayed']);
+        self::assertNull($seen[3][1]['error']);
+        self::assertIsInt($seen[3][1]['durationMs']);
+    }
+
+    public function testOnResponseGetsConnectionError(): void
+    {
+        $errors = [];
+        $this->http->pushNetworkError(new Request('GET', '/'));
+        try {
+            $this->client(0, onResponse: static function (array $i) use (&$errors): void {
+                $errors[] = $i['error'];
+            })->health();
+        } catch (ConnectionError) {
+        }
+        self::assertCount(1, $errors);
+        self::assertInstanceOf(ConnectionError::class, $errors[0]);
     }
 }

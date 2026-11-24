@@ -17,6 +17,7 @@ use Trackified\Http\CurlTransport;
 use Trackified\Http\Psr18Transport;
 use Trackified\Http\Response;
 use Trackified\Http\Transport;
+use Trackified\Model\Data;
 use Trackified\Resource\ApiKeys;
 use Trackified\Resource\Carriers;
 use Trackified\Resource\Trackings;
@@ -24,9 +25,13 @@ use Trackified\Resource\Usage;
 use Trackified\Resource\WebhookDeliveries;
 use Trackified\Resource\Webhooks;
 
+/**
+ * @phpstan-type RequestInfo array{method: string, url: string, attempt: int, idempotencyKey: ?string}
+ * @phpstan-type ResponseInfo array{method: string, url: string, attempt: int, status: ?int, requestId: ?string, idempotentReplayed: bool, durationMs: int, error: ?TrackifiedError}
+ */
 final class TrackifiedClient
 {
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.2.0';
     public const DEFAULT_BASE_URL = 'https://api.trackified.net';
 
     public readonly Trackings $trackings;
@@ -39,13 +44,20 @@ final class TrackifiedClient
     private readonly string $apiKey;
     private readonly string $baseUrl;
     private readonly Transport $transport;
+    /** @var (callable(RequestInfo): mixed)|null */
+    private readonly mixed $onRequest;
+    /** @var (callable(ResponseInfo): mixed)|null */
+    private readonly mixed $onResponse;
 
     /**
-     * @param ?string          $apiKey     defaults to the TRACKIFIED_API_KEY environment variable
-     * @param ?string          $baseUrl    defaults to TRACKIFIED_BASE_URL, then https://api.trackified.net
-     * @param float            $timeout    seconds; applies to the built-in curl transport (configure your own PSR-18 client's timeout on it)
-     * @param int              $maxRetries retries for network errors, 408, 429 and 5xx
-     * @param ?ClientInterface $httpClient PSR-18 client; discovered (Guzzle, Symfony, ...) when null, curl fallback if none
+     * @param ?string                              $apiKey     defaults to the TRACKIFIED_API_KEY environment variable
+     * @param ?string                              $baseUrl    defaults to TRACKIFIED_BASE_URL, then https://api.trackified.net; a trailing /v1 is fine
+     * @param float                                $timeout    seconds; applies to the built-in curl transport (configure your own PSR-18 client's timeout on it)
+     * @param int                                  $maxRetries retries for network errors, 408, 429 and 5xx
+     * @param ?ClientInterface                     $httpClient PSR-18 client; discovered (Guzzle, Symfony, ...) when null, curl fallback if none
+     * @param (callable(RequestInfo): mixed)|null  $onRequest  called before each attempt; exceptions it throws are ignored
+     * @param (callable(ResponseInfo): mixed)|null $onResponse called after each attempt; error is the typed error for
+     *                                                         status >= 400 or a failed connection (status null)
      */
     public function __construct(
         ?string $apiKey = null,
@@ -55,13 +67,17 @@ final class TrackifiedClient
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
+        ?callable $onRequest = null,
+        ?callable $onResponse = null,
     ) {
         $apiKey ??= self::env('TRACKIFIED_API_KEY');
         if (null === $apiKey || '' === $apiKey) {
             throw new AuthenticationError('No API key provided. Pass one to new TrackifiedClient() or set TRACKIFIED_API_KEY.');
         }
         $this->apiKey = $apiKey;
-        $this->baseUrl = rtrim($baseUrl ?? self::env('TRACKIFIED_BASE_URL') ?? self::DEFAULT_BASE_URL, '/');
+        $this->baseUrl = (string) preg_replace('#/v1$#', '', rtrim($baseUrl ?? self::env('TRACKIFIED_BASE_URL') ?? self::DEFAULT_BASE_URL, '/'));
+        $this->onRequest = $onRequest;
+        $this->onResponse = $onResponse;
         $this->transport = self::transport($httpClient, $requestFactory, $streamFactory, $timeout);
 
         $this->trackings = new Trackings($this);
@@ -70,6 +86,18 @@ final class TrackifiedClient
         $this->webhookDeliveries = new WebhookDeliveries($this);
         $this->apiKeys = new ApiKeys($this);
         $this->usage = new Usage($this);
+    }
+
+    /**
+     * GET /v1/health (no auth needed). Throws APIError when the API answers 503 degraded.
+     *
+     * @return array{status: string}
+     */
+    public function health(): array
+    {
+        $body = $this->request('GET', '/v1/health');
+
+        return ['status' => Data::str($body, 'status')];
     }
 
     /**
@@ -105,9 +133,13 @@ final class TrackifiedClient
         }
 
         for ($attempt = 0;; ++$attempt) {
+            $info = ['method' => $method, 'url' => $url, 'attempt' => $attempt + 1];
+            self::hook($this->onRequest, $info + ['idempotencyKey' => $idempotencyKey]);
+            $started = hrtime(true);
             try {
                 $response = $this->transport->send($method, $url, $headers, $payload);
             } catch (ConnectionError $e) {
+                self::hook($this->onResponse, $info + ['status' => null, 'requestId' => null, 'idempotentReplayed' => false, 'durationMs' => self::ms($started), 'error' => $e]);
                 if ($attempt >= $this->maxRetries) {
                     throw $e;
                 }
@@ -115,12 +147,21 @@ final class TrackifiedClient
                 continue;
             }
 
-            if ($response->status >= 200 && $response->status < 300) {
+            $ok = $response->status >= 200 && $response->status < 300;
+            $error = $ok ? null : TrackifiedError::fromResponse($response);
+            self::hook($this->onResponse, $info + [
+                'status' => $response->status,
+                'requestId' => $response->header('x-request-id'),
+                'idempotentReplayed' => 'true' === $response->header('idempotent-replayed'),
+                'durationMs' => self::ms($started),
+                'error' => $error,
+            ]);
+            if (null === $error) {
                 return self::decode($response);
             }
             $retryable = 408 === $response->status || 429 === $response->status || $response->status >= 500;
             if (!$retryable || $attempt >= $this->maxRetries) {
-                throw TrackifiedError::fromResponse($response);
+                throw $error;
             }
             self::sleep(self::backoff($attempt, $response->header('retry-after')));
         }
@@ -134,6 +175,27 @@ final class TrackifiedClient
         $b[8] = \chr((\ord($b[8]) & 0x3F) | 0x80);
 
         return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($b), 4));
+    }
+
+    /**
+     * A hook must never break the request.
+     *
+     * @param array<string, mixed> $info
+     */
+    private static function hook(?callable $hook, array $info): void
+    {
+        if (null === $hook) {
+            return;
+        }
+        try {
+            $hook($info);
+        } catch (\Throwable) {
+        }
+    }
+
+    private static function ms(int|float $started): int
+    {
+        return (int) round((hrtime(true) - $started) / 1e6);
     }
 
     /** @return array<mixed> */

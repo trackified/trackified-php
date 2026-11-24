@@ -33,7 +33,10 @@ final class Psr18Transport implements Transport
         try {
             $response = $this->client->sendRequest($request);
         } catch (ClientExceptionInterface $e) {
-            throw new ConnectionError('Request to Trackified failed: '.$e->getMessage(), previous: $e);
+            // shortcut: PSR-18 has no timeout exception type, so match the message (Guzzle/curl "cURL error 28", Symfony "timeout"); switch to client-specific types if one is mis-classified.
+            $timeout = 1 === preg_match('/timed? ?out|timeout|cURL error 28/i', $e->getMessage());
+
+            throw new ConnectionError('Request to Trackified failed: '.$e->getMessage(), errorCode: $timeout ? ConnectionError::TIMEOUT : ConnectionError::CONNECTION, previous: $e);
         }
 
         $out = [];

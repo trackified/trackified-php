@@ -7,8 +7,10 @@ namespace Trackified\Model;
 final class TrackingEvent
 {
     /**
-     * @param ?string      $occurredAt ISO 8601; with an offset only when $timeZoneKnown, may be a date alone, null if unreadable
-     * @param ?string      $date       deprecated: the carrier's original time text, use $occurredAt
+     * @param ?string      $occurredAt ISO 8601, may be a date alone, null if unreadable. Without an offset it is the local
+     *                                 time where the scan happened; when the carrier gives an offset it is included and
+     *                                 $timeZoneKnown is true
+     * @param ?string      $date       deprecated, removed after 2027-06-01: the carrier's original time text, use $occurredAt
      * @param array<mixed> $raw
      */
     public function __construct(

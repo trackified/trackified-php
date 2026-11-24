@@ -39,8 +39,10 @@ class TrackifiedError extends \RuntimeException
 
         $class = match (true) {
             401 === $status => AuthenticationError::class,
+            402 === $status => QuotaExceededError::class,
             403 === $status => PermissionError::class,
             404 === $status => NotFoundError::class,
+            409 === $status => ConflictError::class,
             400 === $status, 422 === $status => ValidationError::class,
             $status >= 500 => APIError::class,
             default => self::class,

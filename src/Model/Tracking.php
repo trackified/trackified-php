@@ -7,7 +7,8 @@ namespace Trackified\Model;
 final class Tracking
 {
     /**
-     * @param list<TrackingEvent> $events newest first
+     * @param list<TrackingEvent> $events newest first, guaranteed by the API (sorted by occurred_at desc; undated events
+     *                                    keep their carrier position after the dated ones)
      * @param array<mixed>        $raw    the full JSON object, including fields this SDK does not model yet
      */
     public function __construct(
